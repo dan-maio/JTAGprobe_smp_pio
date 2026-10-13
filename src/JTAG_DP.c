@@ -279,6 +279,8 @@ uint32_t JTAG_ReadIDCode (void) {
   uint32_t val;
   uint32_t n;
 
+  PIN_TCK_TDI_TO_SIO();
+
   PIN_TMS_SET();
   JTAG_CYCLE_TCK();                         /* Select-DR-Scan */
   PIN_TMS_CLR();
@@ -313,6 +315,8 @@ uint32_t JTAG_ReadIDCode (void) {
 //   return: none
 void JTAG_WriteAbort (uint32_t data) {
   uint32_t n;
+
+  PIN_TCK_TDI_TO_SIO();
 
   PIN_TMS_SET();
   JTAG_CYCLE_TCK();                         /* Select-DR-Scan */
@@ -357,6 +361,7 @@ void JTAG_WriteAbort (uint32_t data) {
 //   ir:     IR value
 //   return: none
 void JTAG_IR (uint32_t ir) {
+  PIN_TCK_TDI_TO_SIO();
   if (DAP_Data.fast_clock) {
     JTAG_IR_Fast(ir);
   } else {
@@ -370,6 +375,7 @@ void JTAG_IR (uint32_t ir) {
 //   data:    DATA[31:0]
 //   return:  ACK[2:0]
 uint8_t  JTAG_Transfer(uint32_t request, uint32_t *data) {
+  PIN_TCK_TDI_TO_SIO();
   if (DAP_Data.fast_clock) {
     return JTAG_TransferFast(request, data);
   } else {

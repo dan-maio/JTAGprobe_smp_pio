@@ -307,6 +307,12 @@ static uint32_t DAP_SWJ_Pins(const uint8_t *request, uint8_t *response) {
            (uint32_t)(*(request+4) << 16) |
            (uint32_t)(*(request+5) << 24);
 
+  // TCK, TDI and TMS from the PIO to SIO, only when this command drives them.
+  if ((select & ((1U << DAP_SWJ_SWCLK_TCK) | (1U << DAP_SWJ_TDI) |
+                 (1U << DAP_SWJ_SWDIO_TMS))) != 0U) {
+    PIN_TCK_TDI_TO_SIO();
+  }
+
   if ((select & (1U << DAP_SWJ_SWCLK_TCK)) != 0U) {
     if ((value & (1U << DAP_SWJ_SWCLK_TCK)) != 0U) {
       PIN_SWCLK_TCK_SET();
@@ -457,6 +463,7 @@ static uint32_t DAP_SWJ_Sequence(const uint8_t *request, uint8_t *response) {
   }
 
 #if ((DAP_SWD != 0) || (DAP_JTAG != 0))
+  PIN_TCK_TDI_TO_SIO();
   SWJ_Sequence(count, request);
   *response = DAP_OK;
 #else
@@ -567,6 +574,15 @@ static uint32_t DAP_JTAG_Sequence(const uint8_t *request, uint8_t *response) {
   response_count = 1U;
 
   sequence_count = *request++;
+#if (DAP_JTAG != 0) && (USE_PIO_JTAG != 0)
+  // All entries streamed through the PIO, which sets TMS itself.
+  if (pio_jtag_is_enabled()) {
+    count = pio_jtag_sequences(sequence_count, request, response);
+    request_count  += count >> 16;
+    response_count += count & 0xFFFFU;
+    return ((request_count << 16) | response_count);
+  }
+#endif
   while (sequence_count--) {
     sequence_info = *request++;
     count = sequence_info & JTAG_SEQUENCE_TCK;

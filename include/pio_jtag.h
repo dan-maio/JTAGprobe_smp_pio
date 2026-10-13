@@ -22,6 +22,7 @@ typedef struct {
     uint sm;
     uint offset;
     bool enabled;
+    bool pins_pio;      // TCK and TDI driven by the PIO (else by SIO)
     uint32_t clock_hz;
     uint pin_tck;
     uint pin_tdi;
@@ -47,6 +48,19 @@ bool pio_jtag_init(uint32_t clock_hz);
 void pio_jtag_deinit(void);
 
 /**
+ * Hand TCK, TDI and TMS from the PIO to SIO, keeping their levels, for the
+ * CPU bit-banging paths (JTAG_IR, JTAG_Transfer, JTAG_ReadIDCode,
+ * JTAG_WriteAbort, DAP_SWJ_Sequence, DAP_SWJ_Pins), through
+ * PIN_TCK_TDI_TO_SIO() in DAP_config.h.
+ */
+void pio_jtag_pins_to_sio(void);
+
+/**
+ * Hand TCK, TDI and TMS back to the PIO, before a sequence is clocked.
+ */
+void pio_jtag_pins_to_pio(void);
+
+/**
  * Check if PIO JTAG acceleration is currently active.
  */
 bool pio_jtag_is_enabled(void);
@@ -59,45 +73,25 @@ bool pio_jtag_is_enabled(void);
 void pio_jtag_set_clock(uint32_t clock_hz);
 
 /**
- * Execute a CMSIS-DAP DAP_JTAG_Sequence command using PIO hardware acceleration.
+ * Run the entries of one DAP_JTAG_Sequence command through the PIO, streamed
+ * without waiting between entries (the PIO sets TMS from each entry header).
+ *
+ * @param count Number of entries.
+ * @param request The entries: info byte, then the TDI bytes (LSB first).
+ * @param response Where the captured TDO bytes go (entries with the TDO flag).
+ * @return Request bytes consumed (upper 16 bits), response bytes written
+ *         (lower 16 bits).
+ */
+uint32_t pio_jtag_sequences(uint32_t count, const uint8_t *request, uint8_t *response);
+
+/**
+ * Run one DAP_JTAG_Sequence entry through the PIO (JTAG_Sequence()).
  *
  * @param info Sequence info byte (TCK count, TMS level, TDO capture flag).
  * @param tdi Input TDI data buffer (LSB first).
  * @param tdo Output TDO data buffer (LSB first, if capture requested).
  */
 void pio_jtag_sequence(uint32_t info, const uint8_t *tdi, uint8_t *tdo);
-
-/**
- * Transmit TDI bits and capture TDO bits at hardware speed.
- *
- * @param tdi Buffer containing bits to shift out on TDI (LSB first).
- * @param tdo Buffer to receive sampled bits from TDO (LSB first), or NULL to discard.
- * @param bit_len Number of clock pulses / bits to transfer.
- */
-void pio_jtag_write_read(const uint8_t *tdi, uint8_t *tdo, size_t bit_len);
-
-/**
- * Transmit TDI bits without capturing TDO.
- *
- * @param tdi Buffer containing bits to shift out on TDI (LSB first).
- * @param bit_len Number of clock pulses / bits to transfer.
- */
-void pio_jtag_write(const uint8_t *tdi, size_t bit_len);
-
-/**
- * Clock TCK for a specified number of cycles with TDI idle high.
- *
- * @param bit_len Number of TCK cycles.
- */
-void pio_jtag_clock(size_t bit_len);
-
-/**
- * Perform a single-bit JTAG cycle with TDI output and TDO sampling.
- *
- * @param tdi Bit value to output on TDI (0 or 1).
- * @return Sampled bit value from TDO (0 or 1).
- */
-uint8_t pio_jtag_cycle_tdio(uint8_t tdi);
 
 #ifdef __cplusplus
 }

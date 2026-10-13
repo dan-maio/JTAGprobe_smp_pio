@@ -366,7 +366,8 @@ Configures the DAP Hardware I/O pins for JTAG mode:
 
 __STATIC_INLINE void PORT_JTAG_SETUP (void) {
 #if (USE_PIO_JTAG != 0)
-  pio_jtag_init(DAP_DEFAULT_SWJ_CLOCK);
+  // The last DAP_SWJ_Clock speed (DAP_DEFAULT_SWJ_CLOCK until one is set).
+  pio_jtag_init(g_pio_jtag.clock_hz);
 #else
   gpio_set_dir(DAP_SWJ_SWCLK_TCK,true);
   gpio_put(DAP_SWJ_SWCLK_TCK, true);
@@ -435,6 +436,19 @@ __STATIC_INLINE void PORT_OFF (void) {
 
 }
 
+
+// The PIO owns TCK, TDI and TMS after PORT_JTAG_SETUP. The CPU bit-banging entry
+// points (JTAG_IR, JTAG_Transfer, JTAG_ReadIDCode, JTAG_WriteAbort,
+// DAP_SWJ_Sequence, DAP_SWJ_Pins) call this once to take them back to SIO;
+// pio_jtag_sequence() returns them. Not in the per-bit pin helpers: SWD
+// would pay for it on every bit.
+__STATIC_FORCEINLINE void     PIN_TCK_TDI_TO_SIO (void) {
+#if (USE_PIO_JTAG != 0)
+    if (g_pio_jtag.pins_pio) {
+        pio_jtag_pins_to_sio();
+    }
+#endif
+}
 
 // SWCLK/TCK I/O pin -------------------------------------
 

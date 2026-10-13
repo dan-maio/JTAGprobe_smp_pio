@@ -8,24 +8,41 @@
 ; Pin assignments:
 ; - TCK: side-set pin 0 (GPIO 19), default HIGH
 ; - TDI: OUT pin 0 (GPIO 18)
+; - TMS: SET pin 0 (GPIO 14)
 ; - TDO: IN pin 0 (GPIO 21)
 ;
-; Autopull: enabled, threshold: 8, shift_right: true (LSB first)
-; Autopush: enabled, threshold: 8, shift_right: true (LSB first)
+; Autopull: DISABLED; pull threshold 8, shift_right: true (LSB first).
+;   The TDI bytes are pulled explicitly with `pull ifempty`, so neither the
+;   header nor the next entry's header is ever shifted out as TDI data.
+; Autopush: enabled, threshold: 8, shift_right: true (LSB first). A byte
+;   lands in ISR bits 31..24; a final partial byte of r bits in bits
+;   31..32-r. The final `push block` never drops a word when the CPU is
+;   behind: the state machine waits for RX FIFO space instead.
 ;
-; Host protocol:
-; 1. Write (bit_count - 1) as a 32-bit word to TX FIFO
-; 2. Stream TDI data bytes (LSB first) to TX FIFO
-; 3. Read back TDO data bytes (LSB first) from RX FIFO
+; Stream protocol, one DAP_JTAG_Sequence entry after the other, without the
+; CPU waiting between entries:
+; 1. Header word: bits 0..6 = TCK count - 1 (0..63), bit 7 = TMS level
+; 2. ceil(count / 8) TDI data bytes (LSB first), one per TX FIFO word
+; 3. RX FIFO: count / 8 + 1 words per entry: the full TDO bytes, then one
+;    word with the last r = count % 8 bits (empty when r = 0)
 
 .wrap_target
-    pull block          side 1      ; Wait for bit_count - 1 from TX FIFO, hold TCK high
-    mov x, osr          side 1      ; Load bit_count - 1 into X counter, hold TCK high
+    pull block          side 1      ; Header, hold TCK high
+    out x, 7            side 1      ; X = TCK count - 1
+    out y, 1            side 1      ; Y = TMS level
+    jmp !y tms_low      side 1
+    set pins, 1         side 1      ; TMS high while TCK is high
+    jmp bits            side 1
+tms_low:
+    set pins, 0         side 1      ; TMS low while TCK is high
+bits:
+    out null, 32        side 1      ; Empty the OSR, so the first `pull ifempty` fetches TDI data
 
 loop:
-    out pins, 1         side 0 [1]  ; Shift 1 bit to TDI, drive TCK low (2 cycles low)
+    pull ifempty block  side 0      ; Next TDI byte after every 8 bits, drive TCK low
+    out pins, 1         side 0      ; Shift 1 bit to TDI (2 cycles low)
     in pins, 1          side 1      ; Sample 1 bit from TDO, drive TCK high
     jmp x--, loop       side 1      ; Decrement X and loop (2 cycles high total)
 
-    push noblock        side 1      ; Push any partial byte remaining in ISR, hold TCK high
+    push block          side 1      ; Push the partial (or empty) last word, hold TCK high
 .wrap
