@@ -85,7 +85,16 @@ All runs **PASS**; each configuration ran once (earlier identical PIO runs diffe
 - **Streaming the entries, with TMS in the stream, halves the JTAG work** (581 → 292 µs per packet at 10 MHz): `load_image` is 16 % faster than with CPU bit-banging and 35 % faster than with 64-byte packets (1,954–1,994 ms), smp_mem_test 16.6 s faster.
 - **15 MHz loads exactly as fast as 10 MHz** (1,287 ms, 291 µs per packet): the TCK clock is no longer the limit; most likely core 1, which feeds the FIFOs one byte per word and sorts the replies, is (not measured separately). The whole test took 285.1 s against 291.5 s, within the ~8 s spread seen between identical runs.
 - **What is left** in a load cycle is mostly receiving the 512-byte request (one 64-byte USB packet at a time) and the PC's turnaround: ≈ 920 µs of 1,450 µs. With `SEMI_PRINTS=1` the whole test is still dominated by OpenOCD reading each semihosted string byte by byte (~0.9 s per line).
-- Not measured: the current build at 4 MHz, and smp_mem_inter_test.
+- Not measured: the current build at 4 MHz.
+
+Both smp_mem tests, built from the GitHub workspace of µOS++ III (`SEMI_PRINTS=1`, PIO with TMS in the stream, `adapter speed 15000`), against the 512-byte CPU bit-banging build at 4 MHz (§ 9.6 of `PERFORMANCE_ANALYSIS_AND_OPTIMIZATION.md`):
+
+| Test | Loaded bytes | `load_image` | JTAG work per packet | Whole test (CTest) | CPU bit-banging, 4 MHz |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| smp_mem_test | 75,208 | **1,273 ms (59.1 KB/s)** | 291 µs | **282.9 s, PASS** | 1,528 ms, 308.1 s |
+| smp_mem_inter_test | 81,048 | **1,399 ms (57.9 KB/s)** | 291 µs | **537.4 s, PASS** | 1,644 ms, 561.8 s |
+
+These images are a few hundred bytes larger than the earlier ones (75,208 against 74,888 bytes): the `SEMI_PRINTS=1` code. Both tests run 4–8 % faster than with CPU bit-banging; smp_mem_test repeated at 15 MHz in 285.1 s (golden build) and 282.9 s (GitHub build). OpenOCD logged `error handling USB events: System call interrupted` and `CMD_DAP_JTAG_SEQ failed` once, right after smp_mem_inter_test's `RESULT: PASS`, most likely the runner stopping OpenOCD in the middle of a command (not investigated further).
 
 ---
 
