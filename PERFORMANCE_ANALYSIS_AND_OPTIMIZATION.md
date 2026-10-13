@@ -17,7 +17,7 @@ When using **JTAGprobe** as a CMSIS-DAP debug probe with OpenOCD, downloading fi
 
 $$\mathbf{100\text{ KB in }\approx 120\text{ seconds}}\quad (\approx \mathbf{850\text{ bytes/sec}})$$
 
-A typical Full-Speed USB CMSIS-DAP probe should achieve between **50 KB/s and 250 KB/s** in software bit-banging mode, and **500 KB/s to 1.5+ MB/s** when hardware-accelerated with PIO. At 850 B/s, the probe is running **100× to 300× slower than its expected performance**.
+A typical Full-Speed USB CMSIS-DAP probe should achieve between **50 KB/s and 250 KB/s** in software bit-banging mode, and **500 KB/s to 1.5+ MB/s** when hardware-accelerated with PIO. (Those are general expectations, not measured here: on the Raspberry Pi 4 B, where OpenOCD waits for each packet's reply, the best measured load is **58.2 KB/s** with PIO, § 9.7.) At 850 B/s, the probe is running **100× to 300× slower than its expected performance**.
 
 ### 1.2 Root Cause Summary
 The issue is not target flash write speed or USB bus limits. It is a compounding cascade of firmware bottlenecks:
@@ -210,14 +210,14 @@ In `src/DAP.c`:
                               |
                               v  [Step 4: PIO Hardware JTAG]
 +-------------------------------------------------------------+
-|  Milestone 4: 100 KB in < 0.15s (> 700 KB/s, PIO State Mach) |
+|  Milestone 4 (measured, § 9.7): 74.9 KB in 1.29 s (58.2 KB/s) |
 +-------------------------------------------------------------+
 ```
 
 1. **Step 1 (Silence Debug Logging):** Eliminate synchronous `printf` calls over 115,200 baud UART while the scheduler is suspended. Reduces packet latency from 5.8 ms to microseconds.
 2. **Step 2 (Single-Cycle SIO Pin Access):** Replace SDK dynamic GPIO functions with direct RP2040 SIO register atomic bitmask operations (`gpio_set_mask`, `gpio_clr_mask`, `gpio_get_all`).
 3. **Step 3 (Multi-Packet Pipelining & 512B Packets):** Increase packet queue capacity (`DAP_PACKET_COUNT = 4`) and expand CMSIS-DAP v2 packet size to 512 bytes, cutting USB round trips by up to 8.6×.
-4. **Step 4 (Hardware PIO State Machine Offload):** Offload TCK clocking, TDI serialization, and TDO deserialization to dedicated RP2040 PIO state machines (`src/jtag.pio`). Eliminates CPU bit-banging loops, provides an exact 50% TCK duty cycle, and achieves hardware-speed transfers with deadlock-free FIFO streaming. **Implemented in `JTAGprobe_smp_pio`.**
+4. **Step 4 (PIO JTAG):** Run `DAP_JTAG_Sequence` on an RP2040 PIO state machine (`src/jtag.pio`), with TMS in the PIO stream so the CPU never waits between entries. **Implemented in `JTAGprobe_smp_pio`**; measured at `adapter speed 10000`: the JTAG work per 512-byte packet halves (581 → 292 µs) and `load_image` is 16 % faster (§ 9.7). The USB round trip, not the PIO, now sets the load rate.
 
 
 ---
@@ -377,119 +377,52 @@ if (buffer_empty(&USBResponseBuffer)) {
 
 ---
 
-### Patch 4: RP2040 PIO State Machine Hardware Acceleration for JTAG
-**Files:** `src/jtag.pio`, `include/pio_jtag.h`, `src/pio_jtag.c`, `src/JTAG_DP.c`
+### Patch 4: PIO JTAG (`JTAGprobe_smp_pio`)
+**Files:** `src/jtag.pio`, `include/pio_jtag.h`, `src/pio_jtag.c`, `src/DAP.c`, `src/JTAG_DP.c`, `include/DAP_config.h`
 
-While direct SIO register operations (Patch 2) reduce GPIO access overhead to single-cycle writes, CPU bit-banging loops on ARM Cortex-M0+ still require multiple instructions per bit to toggle TCK, sample TDO, shift registers, and branch. On Core 1, bit-banging consumes ~580 µs of every 1,740 µs 512-byte packet cycle. Furthermore, software timing loops are subject to instruction pipelining and bus stalls, resulting in asymmetric duty cycles.
+In JTAG mode OpenOCD drives the target almost only with `DAP_JTAG_Sequence` commands: up to a few hundred entries per 512-byte packet, each one 1–64 TCK cycles with a fixed TMS level, TDI bits and an optional TDO capture. `JTAGprobe_smp_pio` runs those commands on an RP2040 PIO state machine (`src/jtag.pio`, `src/pio_jtag.c`, `include/pio_jtag.h`).
 
-`JTAGprobe_smp_pio` offloads high-speed JTAG clock generation and serialization to dedicated RP2040 Programmable I/O (PIO0 State Machine 0).
-
-#### 1. PIO State Machine Assembly (`src/jtag.pio`)
-
-The state machine (`jtag_tdo`) implements 1-bit side-set TCK, OUT TDI, and IN TDO with hardware autopush and autopull:
+#### 1. The state machine (`src/jtag.pio`)
 
 ```pasm
 .program jtag_tdo
-.side_set 1
-
-; Pin assignments:
-; - TCK: side-set pin 0 (GPIO 19), default HIGH
-; - TDI: OUT pin 0 (GPIO 18)
-; - TDO: IN pin 0 (GPIO 21)
-;
-; Autopull: enabled, threshold: 8, shift_right: true (LSB first)
-; Autopush: enabled, threshold: 8, shift_right: true (LSB first)
-
+.side_set 1                         ; TCK = side-set (GPIO 19), TDI = OUT (GPIO 18),
+                                    ; TMS = SET (GPIO 14),      TDO = IN (GPIO 21)
 .wrap_target
-    pull block          side 1      ; Wait for bit_count - 1 from TX FIFO, hold TCK high
-    mov x, osr          side 1      ; Load bit_count - 1 into X counter, hold TCK high
-
+    pull block          side 1      ; Header, hold TCK high
+    out x, 7            side 1      ; X = TCK count - 1
+    out y, 1            side 1      ; Y = TMS level
+    jmp !y tms_low      side 1
+    set pins, 1         side 1      ; TMS high while TCK is high
+    jmp bits            side 1
+tms_low:
+    set pins, 0         side 1      ; TMS low while TCK is high
+bits:
+    out null, 32        side 1      ; Empty the OSR, so the first `pull ifempty` fetches TDI data
 loop:
-    out pins, 1         side 0 [1]  ; Shift 1 bit to TDI, drive TCK low (2 cycles low)
+    pull ifempty block  side 0      ; Next TDI byte after every 8 bits, drive TCK low
+    out pins, 1         side 0      ; Shift 1 bit to TDI (2 cycles low)
     in pins, 1          side 1      ; Sample 1 bit from TDO, drive TCK high
     jmp x--, loop       side 1      ; Decrement X and loop (2 cycles high total)
-
-    push noblock        side 1      ; Push any partial byte remaining in ISR, hold TCK high
+    push block          side 1      ; Push the partial (or empty) last word
 .wrap
 ```
 
-#### 2. Exact 50% Duty Cycle & Frequency Divider Calculation
+- **Stream protocol.** Per entry the TX FIFO gets a header word (bits 0–6: TCK count − 1, bit 7: TMS) and then one TDI byte per word. The RX FIFO returns `count / 8 + 1` words: the full TDO bytes, then one word with the last `count % 8` bits (empty when the count is a multiple of 8).
+- **TMS** is set by the PIO from the header while TCK is still high, before the entry's first falling edge: the target samples it on the rising edges.
+- **TDI** is fetched explicitly with `pull ifempty` (autopull off, threshold 8). With autopull, the header would stay in the output shift register and go out as TDI data, and the next entry's header would be prefetched as data.
+- **TDO** uses 8-bit autopush with right shift: a full byte arrives in bits 31..24 of the RX word, the last r bits in bits 31..32−r. The final `push block` waits for RX FIFO space instead of dropping a word.
+- **Clock.** Every bit takes 4 PIO cycles, 2 with TCK low and 2 with TCK high, so `div = f_sys / (4 × f_TCK)`. `DAP_SWJ_Clock` (OpenOCD `adapter speed`) sets the divider with `pio_jtag_set_clock()`; `PORT_JTAG_SETUP` restarts the PIO at the last requested speed.
 
-Every JTAG bit period comprises exactly 4 PIO clock cycles:
-- **TCK Low Phase:** 2 cycles (`out pins, 1 side 0 [1]` takes 1 instruction cycle + 1 delay cycle while asserting TCK = 0).
-- **TCK High Phase:** 2 cycles (`in pins, 1 side 1` takes 1 cycle with TCK = 1; `jmp x--, loop side 1` takes 1 cycle with TCK = 1).
+#### 2. The CPU side (`pio_jtag_sequences()`)
 
-This guarantees an **exact 50% duty cycle** across all frequencies. The 16.8-bit fractional clock divider $\text{div}$ is computed from the RP2040 system clock $f_{\text{sys}}$ (typically 125 MHz) and target frequency $f_{\text{TCK}}$:
+`DAP_JTAG_Sequence` (`src/DAP.c`) hands a whole command to `pio_jtag_sequences()`. Two cursors walk the same request: one feeds headers and TDI bytes into the TX FIFO, the other sorts the RX words into the response, keeping only the entries with the TDO flag. The PIO runs entry after entry; core 1 only keeps both 4-word FIFOs moving and never waits for an entry to finish.
 
-$$\text{div} = \frac{f_{\text{sys}}}{4 \times f_{\text{TCK}}}$$
+#### 3. Pins shared with the CPU bit-banging paths
 
-When OpenOCD issues a `DAP_SWJ_Clock` command (e.g. `adapter speed 4000`), `pio_jtag_set_clock(clock_hz)` dynamically recalculates and loads the divider into the state machine registers via `pio_sm_set_clkdiv()`.
+The other JTAG commands (`DAP_Transfer`, `DAP_TransferBlock`, `DAP_WriteABORT`, `DAP_JTAG_IDCODE`) and `DAP_SWJ_Sequence` / `DAP_SWJ_Pins` still bit-bang through SIO. Their entry points call `PIN_TCK_TDI_TO_SIO()` (`include/DAP_config.h`), which hands TCK, TDI and TMS back to SIO at their current levels, so no pin glitches; the next `DAP_JTAG_Sequence` returns them to the PIO. SWD mode does not use the PIO at all (`PORT_SWD_SETUP` stops it). TDO has the input synchronizer bypassed (`input_sync_bypass`); nTRST and nRESET stay on SIO.
 
-#### 3. Deadlock-Free Interleaved FIFO Pipeline
-
-The RP2040 state machine FIFOs are 4 words (16 bytes) deep. When shifting large buffers (up to 512 bytes), autopush stalls the state machine once the RX FIFO fills with 4 words. If the CPU performs a blocking write to the TX FIFO while the state machine is stalled waiting for RX FIFO space, a permanent deadlock occurs.
-
-`pio_jtag_write_read()` in `src/pio_jtag.c` implements a concurrent non-blocking pump:
-
-```c
-void pio_jtag_write_read(const uint8_t *tdi, uint8_t *tdo, size_t bit_len) {
-    if (bit_len == 0 || !g_pio_jtag.enabled) return;
-
-    size_t byte_count = (bit_len + 7U) / 8U;
-    size_t remainder = bit_len % 8U;
-    size_t rx_count = (remainder != 0U) ? byte_count : (byte_count + 1U);
-    size_t tx_remain = byte_count;
-    size_t rx_remain = rx_count;
-
-    // Send bit_len - 1 into TX FIFO to initialize the X loop counter
-    pio_sm_put_blocking(g_pio_jtag.pio, g_pio_jtag.sm, (uint32_t)(bit_len - 1U));
-
-    while (tx_remain > 0 || rx_remain > 0) {
-        // Feed TX FIFO whenever space is available
-        if (tx_remain > 0 && !pio_sm_is_tx_fifo_full(g_pio_jtag.pio, g_pio_jtag.sm)) {
-            uint8_t byte_val = tdi ? *tdi++ : 0xFFU;
-            g_pio_jtag.pio->txf[g_pio_jtag.sm] = (uint32_t)byte_val;
-            tx_remain--;
-        }
-
-        // Drain RX FIFO whenever data is available
-        if (rx_remain > 0 && !pio_sm_is_rx_fifo_empty(g_pio_jtag.pio, g_pio_jtag.sm)) {
-            uint32_t val = g_pio_jtag.pio->rxf[g_pio_jtag.sm];
-            if (tdo != NULL) {
-                if (rx_remain > 1) {
-                    *tdo++ = (uint8_t)val;
-                } else if (remainder != 0U) {
-                    // Realign final partial byte
-                    *tdo++ = (uint8_t)(val >> (8U - remainder));
-                }
-            }
-            rx_remain--;
-        }
-    }
-}
-```
-
-#### 4. CMSIS-DAP LSB-First Framing & Fractional Byte Realignment
-
-- **Bit Direction:** CMSIS-DAP specifies LSB-first framing (`shift_right = true`). Both OSR and ISR shift right, shifting out the least significant bit first and shifting in sampled bits at MSB positions down to LSB.
-- **Fractional Sequence Alignment:** For an arbitrary sequence length $N$, if $N \pmod 8 \ne 0$, the last byte contains $r = N \pmod 8$ valid bits. Because the loop terminates after $N$ cycles, the remaining $r$ bits reside in the upper bits of the ISR. The trailing `push noblock side 1` flushes the ISR into the RX FIFO. Software then right-shifts the final byte by $(8 - r)$ so that the valid bits are aligned starting at bit 0, matching CMSIS-DAP framing rules.
-
-#### 5. Integration with CMSIS-DAP (`src/JTAG_DP.c`)
-
-In `JTAG_Sequence()`, hardware execution is routed through the PIO subsystem:
-
-```c
-void JTAG_Sequence (uint32_t info, const uint8_t *tdi, uint8_t *tdo) {
-#if (USE_PIO_JTAG != 0)
-  if (pio_jtag_is_enabled()) {
-    pio_jtag_sequence(info, tdi, tdo);
-    return;
-  }
-#endif
-  /* Fallback to single-cycle SIO bit-banging */
-  ...
-}
-```
+Measurements: § 9.7.
 
 ---
 
@@ -519,7 +452,9 @@ cmsis_dap_backend bulk
 | **Step 1 Applied** (UART logging disabled) | **4.2 s** | **24.4 KB/s** | **28×** |
 | **Step 1 + Step 2** (+ SIO bit-banging) | **1.9 s** | **53.9 KB/s** | **63×** |
 | **Step 1 + 2 + 3** (+ 4-packet ring buffer pipelining) | **0.9 s** | **113.8 KB/s** | **133×** |
-| **PIO State Machine** (Hardware JTAG in `JTAGprobe_smp_pio`) | **< 0.15 s** | **> 700 KB/s** | **> 800×** |
+| **PIO, TMS in the stream** (`JTAGprobe_smp_pio`, 512-byte packets, 10 MHz; **measured**, § 9.7) | **≈ 1.7 s** (74.9 KB in 1.29 s) | **58.2 KB/s** | **≈ 68×** |
+
+The first four rows are this analysis' estimates for the single-core firmware; the measured rates on the Raspberry Pi 4 B are in § 9.
 
 ---
 
@@ -633,17 +568,15 @@ cmsis-dap cmd 0x80 <i>      ;# read counter i (0..11): "Returned data b0 b1 b2 b
 - **Packet path outside the kernel:** during a transfer the requests and responses pass through the lock-free rings (§ 8.3) and the threads spin (§ 8.4); the kernel sleeps and wakes threads only when the probe goes idle and becomes active again. A cross-core sleep and wake-up per packet cost the first build a factor of 4 (§ 9.2).
 - **Core usage during a load** (512-byte packets, counters of § 9.6): core 1 bit-bangs JTAG for ~580 µs of each ~1,740 µs cycle (about ⅓) and spins for the rest; core 0 handles the USB events of the request and response transfers, ~7 µs to start each response, and the UART bridge. For about ⅔ of each cycle neither core has useful work, waiting on USB and the PC: the CPUs are not the bottleneck. After 2 ms without packets both threads sleep on their semaphores. These shares come from the per-stage packet timing; no per-core CPU-load counter was measured.
 
-### 8.7 RP2040 PIO Hardware Co-processing (JTAGprobe_smp_pio)
+### 8.7 PIO in JTAGprobe_smp_pio
 
-In `JTAGprobe_smp_pio`, the probe's workload is distributed across three specialized hardware and software execution tiers:
+| Where | Work |
+| :--- | :--- |
+| **Core 0** | tinyusb (`TUD` thread) and the UART bridge (`UART` thread), as in JTAGprobe_smp |
+| **Core 1** | the `DAP` thread: runs each DAP command; for `DAP_JTAG_Sequence` it only streams the entries into the PIO's TX FIFO and sorts the TDO bytes from its RX FIFO (`pio_jtag_sequences()`) |
+| **PIO state machine** | TCK, TDI, TMS and TDO of every `DAP_JTAG_Sequence` entry, at the `adapter speed` clock (Patch 4) |
 
-| Execution Tier | Hardware / Core | Assigned Functionality | Concurrency & Scheduling Model |
-| :--- | :--- | :--- | :--- |
-| **Tier 1 (Host & Bridge)** | **Core 0** (Cortex-M0+) | TinyUSB bulk transfers & CDC-ACM UART Bridge | High-priority RTOS preemption; processes USB events and maintains full-speed UART console without losing characters |
-| **Tier 2 (Protocol Engine)** | **Core 1** (Cortex-M0+) | CMSIS-DAP Command Dispatcher | Dedicated execution; unpacks DAP commands from the lock-free ring buffer and feeds PIO FIFOs |
-| **Tier 3 (Physical Layer)** | **PIO0 SM0** (Hardware PIO) | Autonomous JTAG bit serialization & sampling | Hardware-timed TCK clocking (50% duty cycle), autonomous TDI shifting and TDO sampling with zero CPU stalls |
-
-By offloading the serial bit stream to PIO0 state machine 0, Core 1 no longer spends ~580 µs per packet spinning in software bit-banging loops. Instead, `pio_jtag_sequence()` feeds data bytes into the 4-word TX FIFO and harvests captured TDO bytes from the RX FIFO concurrently, achieving deadlock-free streaming with sub-cycle timing accuracy.
+The other JTAG commands and `DAP_SWJ_Sequence`/`DAP_SWJ_Pins` still bit-bang on core 1, taking TCK, TDI and TMS back from the PIO first. Core 1 still spins while the PIO works (it polls the FIFOs): the PIO does not free the core, it shortens the work, from 581 to 292 µs per 512-byte packet during a load at 10 MHz (§ 9.7).
 
 ---
 
@@ -786,6 +719,26 @@ Whole runs (CTest, 10 s reset wait), all **PASS**:
 - With `SEMI_PRINTS=1` the gain is ~9 %. The bulk of those runs is still OpenOCD reading every semihosted string byte by byte (§ 9.5), which the packet size cannot change.
 - Next step on the probe side: time the OUT reception separately, and arm the rest of a request in one transfer once `dap_req_len()` knows its length, instead of one 64-byte packet at a time.
 
+### 9.7 PIO JTAG (`JTAGprobe_smp_pio`)
+
+smp_mem_test with `SEMI_PRINTS=1`, 512-byte packets, Patch 4 in its successive versions:
+
+| Probe firmware | `adapter speed` | `load_image` (74,888 B) | JTAG work per packet | Load cycle per packet | Whole test (CTest) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| JTAGprobe_smp, CPU bit-banging | 4000 | 1,528 ms (49.0 KB/s) | 581 µs | 1,745 µs | 308.1 s |
+| PIO, TMS through SIO, waiting after each entry | 4000 | 1,702 ms | 755 µs | 1,934 µs | 324.5 / 332.0 s |
+| PIO, TMS through SIO, waiting after each entry | 10000 | 1,578 ms | 621 µs | 1,794 µs | 315.3 s |
+| **PIO, TMS in the stream (current)** | **10000** | **1,286 ms (58.2 KB/s)** | **292 µs** | **1,450 µs** | **291.5 s** |
+| PIO, TMS in the stream (current) | 15000 | 1,287 ms (58.2 KB/s) | 291 µs | 1,448 µs | 285.1 s |
+
+All runs **PASS**; each configuration ran once (earlier identical PIO runs differed by ~8 s in total time). *JTAG work per packet* is the probe's `DAP_ExecuteCommand()` time, from its packet counters (DAP vendor command `0x80`).
+
+- **A PIO that waits after every entry is slower than CPU bit-banging.** With a few hundred short entries per packet, setting TMS from the CPU and waiting for each entry cost ~530 µs per packet; raising TCK from 4 to 10 MHz saved only 134 µs.
+- **Streaming the entries, with TMS in the stream, halves the JTAG work** (581 → 292 µs per packet at 10 MHz): `load_image` is 16 % faster than with CPU bit-banging and 35 % faster than with 64-byte packets (1,954–1,994 ms), smp_mem_test 16.6 s faster.
+- **15 MHz loads exactly as fast as 10 MHz** (1,287 ms, 291 µs per packet): the TCK clock is no longer the limit; most likely core 1, which feeds the FIFOs one byte per word and sorts the replies, is (not measured separately). The whole test took 285.1 s against 291.5 s, within the ~8 s spread seen between identical runs.
+- **What is left** in a load cycle is mostly receiving the 512-byte request (one 64-byte USB packet at a time) and the PC's turnaround: ≈ 920 µs of 1,450 µs. With `SEMI_PRINTS=1` the whole test is still dominated by OpenOCD reading each semihosted string byte by byte (~0.9 s per line).
+- Not measured: the current build at 4 MHz, and smp_mem_inter_test.
+
 ---
 
 ## 10. Conclusion
@@ -796,21 +749,21 @@ Applying **Patch 1** alone provides an immediate **28× speedup** (reducing 120s
 
 Measured on a Raspberry Pi 4 B over JTAG (§ 9), where OpenOCD sends about 9.9 loaded bytes per packet and one packet at a time: the optimized FreeRTOS firmware loads at **34–39.5 KB/s** against ~1.05 KB/s for the stock firmware. **JTAGprobe_smp** (µOS++ III SMP, DAP on core 1): its first build lost a factor of 4 to two cross-core wake-ups per packet (9.95 KB/s), which the second build fixed: with the DAP thread spinning on its ring and sending its own responses it loads at **37.6–38.5 KB/s**, as fast as the single-core firmware, and the complete smp_mem_test ran in 50–54 s against 140 s. The probe's own counters (§ 9.4) put the core-to-core hand-off at ~7 µs per packet and show that ~70 % of each cycle was the USB round trip and the PC. The 512-byte packet build (§ 9.6) achieves 8.6× fewer packets, loads at **48.4–49.3 KB/s** (23 % faster, 1.45× the single-core firmware), and the tests finish faster (smp_mem_test 47.1 s, smp_mem_inter_test 175.9 s; with `SEMI_PRINTS=1` 308.1 s and 561.8 s, all PASS). With semihosting prints on, a semihosted line still costs ~0.9 s, set by OpenOCD (§ 9.5).
 
-Finally, **JTAGprobe_smp_pio** introduces **RP2040 PIO state machine hardware acceleration** (§ 4 Patch 4, § 8.7), eliminating the ~580 µs CPU bit-banging stall on Core 1 by executing JTAG clocking and serial I/O in dedicated hardware with an exact 50% duty cycle, deadlock-free concurrent FIFO streaming, and sub-cycle timing accuracy.
+Finally, **JTAGprobe_smp_pio** runs `DAP_JTAG_Sequence` on an RP2040 PIO state machine (§ 4 Patch 4, § 8.7). A first version that set TMS from the CPU and waited after every entry was *slower* than CPU bit-banging (755 µs per packet at 4 MHz); with TMS in the PIO stream and the entries streamed back to back, the JTAG work per packet halves (581 → 292 µs at 10 MHz), `load_image` reaches **58.2 KB/s** (16 % faster) and smp_mem_test with `SEMI_PRINTS=1` runs in **291.5 s** instead of 308.1 s (§ 9.7, PASS).
 
 ---
 
-## 11. Final Reflection: One CPU vs Two CPUs + PIO
+## 11. Final Reflection: One CPU vs Two CPUs
 
-| Raspberry Pi 4 B over JTAG, OpenOCD 0.12 | 1 CPU (FreeRTOS JTAGprobe) | 2 CPUs (JTAGprobe_smp) | 2 CPUs + PIO (JTAGprobe_smp_pio) |
-| :--- | ---: | ---: | ---: |
-| `load_image`, smp_mem_inter_test (80,984 B) | 2,380 ms (34.0 KB/s) | 2,106–2,143 ms (37.8–38.5 KB/s) | **1,644–1,649 ms (49.1–49.3 KB/s)** with 512B packets + PIO |
-| Probe time per packet (≈ 9.9 loaded bytes) | 251–292 µs | 259–264 µs | **Hardware timed (50% duty cycle)** |
-| Whole smp_mem_test (CTest) | 140 s | 50–54 s | **47.1 s** with 512-byte packets |
-| Whole smp_mem_inter_test (CTest) | 190 s | 186–193 s | **175.9 s** with 512-byte packets |
-| smp_mem_test / smp_mem_inter_test with `SEMI_PRINTS=1` | — | 337 s / 621 s | **308 s / 562 s** with 512-byte packets |
+| Raspberry Pi 4 B over JTAG, OpenOCD 0.12 | 1 CPU (FreeRTOS JTAGprobe) | 2 CPUs (JTAGprobe_smp) |
+| :--- | ---: | ---: |
+| `load_image`, smp_mem_inter_test (80,984 B) | 2,380 ms (34.0 KB/s) | 2,106–2,143 ms (37.8–38.5 KB/s) |
+| Probe time per packet (≈ 9.9 loaded bytes) | 251–292 µs | 259–264 µs |
+| Whole smp_mem_test (CTest) | 140 s | 50–54 s |
+| Whole smp_mem_inter_test (CTest) | 190 s | 186–193 s |
+| smp_mem_test / smp_mem_inter_test with `SEMI_PRINTS=1` | — | 337 s / 621 s |
 
-Both baseline columns use 64-byte DAP packets. The 512-byte packets of the current build (1,644 ms, 47.1 s and 175.9 s for the same three rows) cut round trips, which would help a single-core firmware in the same way, so they are left out of this one-vs-two comparison.
+Both columns use 64-byte DAP packets and CPU bit-banging at `adapter speed 4000`. The 512-byte packets (§ 9.6: 1,644 ms, 47.1 s, 175.9 s, 308 s / 562 s for the same rows) and the PIO (§ 9.7: smp_mem_test load 1,286 ms, 291.5 s with `SEMI_PRINTS=1`) cut the time per byte in ways that would help a single-core firmware just as well, so they are left out of this one-vs-two comparison.
 
 ### 11.1 JTAG operations
 - **Bulk transfers (`load_image`): about the same.** OpenOCD runs a strict request/reply chain in JTAG mode: one ~64-byte command (≈ 9.9 loaded bytes), then it waits for the answer. In such a chain a second core has nothing to overlap. Of a ~263 µs cycle, the counters of § 9.4 give ~68 µs to the bit-banging on core 1, ~7 µs to the hand-off between the cores, and ~188 µs to the USB transfer and the PC's turnaround. A second core can only *lose* time here, if the hand-off sleeps: the first SMP build (history, fixed since the second build) woke the other core twice per packet and needed ~1 ms per packet (4× slower). Keeping the packet path free of sleeps (the DAP thread spins on its ring and sends its own reply) is what made the two-core firmware as fast as the single-core one.
@@ -827,7 +780,7 @@ To the probe a semihosting call is ordinary JTAG traffic, so it gains like any s
 Not in another division of work between the two Pico cores (the hand-off is already ~7 µs per packet), but in:
 
 1. **fewer round trips**: a larger `DAP_PACKET_SIZE`. **Done** in the current build (512 bytes over the 64-byte endpoint, § 9.6): loads 23 % faster, tests 6–10 % faster. What is left there is the ≈ 910 µs per packet of request reception plus PC turnaround, to be measured and, if it is the per-USB-packet re-arm, reduced by arming the rest of a request in one transfer;
-2. **faster bit-banging**: a PIO state machine for TCK/TMS/TDI/TDO (now ~580 µs of each 1,740 µs cycle). **Done in `JTAGprobe_smp_pio`**: implemented in `src/jtag.pio` and `src/pio_jtag.c`, delivering exact 50% duty cycle hardware serialization and zero CPU bit-banging stalls;
+2. **faster bit-banging**: a PIO state machine for TCK/TMS/TDI/TDO. **Done in `JTAGprobe_smp_pio`** (§ 9.7): with TMS in the PIO stream and `adapter speed 10000`, 292 µs instead of 581 µs per packet; the request reception plus the PC's turnaround (≈ 920 µs of ≈ 1,450 µs) is now the largest part of a load cycle;
 3. **the host**: reading semihosting strings in blocks instead of byte by byte.
 
 
