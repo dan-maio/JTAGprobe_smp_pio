@@ -6,7 +6,7 @@
 **Target Repository:** `dan-maio/JTAGprobe_smp_pio` (upstream: `dst202/JTAGprobe`)  
 **Applicable Hardware:** Raspberry Pi Pico (RP2040) / Raspberry Pi Pico 2 (RP2350)
 
-> **Note:** Sections 1–7 analyse and optimize the single-core FreeRTOS JTAGprobe (branch `jtagprobe-new`); JTAGprobe_smp carries all of those optimizations; JTAGprobe_smp_pio adds full RP2040 PIO state machine hardware acceleration for JTAG pins. Section 8 describes the µOS++ III SMP integration (RP2040 only) and section 9 the measured OpenOCD `load_image` times on a Raspberry Pi 4 B.
+> **Note:** Sections 1–7 analyse and optimize the single-core FreeRTOS JTAGprobe (branch `jtagprobe-new`); JTAGprobe_smp carries all of those optimizations; JTAGprobe_smp_pio runs `DAP_JTAG_Sequence` on an RP2040 PIO state machine (the other JTAG commands still bit-bang on the CPU). Section 8 describes the µOS++ III SMP integration (RP2040 only) and section 9 the measured OpenOCD `load_image` times on a Raspberry Pi 4 B.
 
 ---
 

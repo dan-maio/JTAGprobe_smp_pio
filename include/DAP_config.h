@@ -440,7 +440,7 @@ __STATIC_INLINE void PORT_OFF (void) {
 // The PIO owns TCK, TDI and TMS after PORT_JTAG_SETUP. The CPU bit-banging entry
 // points (JTAG_IR, JTAG_Transfer, JTAG_ReadIDCode, JTAG_WriteAbort,
 // DAP_SWJ_Sequence, DAP_SWJ_Pins) call this once to take them back to SIO;
-// pio_jtag_sequence() returns them. Not in the per-bit pin helpers: SWD
+// pio_jtag_sequences() returns them. Not in the per-bit pin helpers: SWD
 // would pay for it on every bit.
 __STATIC_FORCEINLINE void     PIN_TCK_TDI_TO_SIO (void) {
 #if (USE_PIO_JTAG != 0)

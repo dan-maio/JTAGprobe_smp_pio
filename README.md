@@ -10,7 +10,7 @@ It builds on `JTAGprobe_smp` (dual-core µOS++ III SMP kernel) and introduces **
 
 ## Features
 
-- **PIO JTAG:** `DAP_JTAG_Sequence`, the command OpenOCD uses in JTAG mode, runs on an RP2040 PIO state machine (`src/jtag.pio`, `src/pio_jtag.c`, `include/pio_jtag.h`), with TCK at the requested `adapter speed` and a 50 % duty cycle. All entries of a command are streamed back to back: the PIO sets TMS from each entry's header, so the CPU never waits between entries.
+- **PIO JTAG:** `DAP_JTAG_Sequence`, the command OpenOCD uses in JTAG mode, runs on an RP2040 PIO state machine (`src/jtag.pio`, `src/pio_jtag.c`, `include/pio_jtag.h`), with TCK at the requested `adapter speed` and a 50 % duty cycle while core 1 keeps the PIO's FIFOs fed (when it falls behind, TCK stays low longer). All entries of a command are streamed back to back: the PIO sets TMS from each entry's header, so the CPU never waits between entries.
 - **Measured** (Raspberry Pi 4 B, `adapter speed 10000`): the JTAG work per 512-byte packet takes 292 µs instead of 581 µs with CPU bit-banging; `load_image` is 16 % faster and smp_mem_test 5 % faster (see *PIO results* below).
 - **JTAG & SWD Debugging:** Full CMSIS-DAP v2 bulk transport support for OpenOCD, pyOCD, probe-rs, and Keil MDK.
 - **Hardware USB CDC-ACM UART Bridge:** Virtual COM port (`/dev/ttyACMx` on Linux, `COMx` on Windows) bridged directly to target UART on GPIO 12/13.
