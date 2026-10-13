@@ -10,7 +10,7 @@
         padding-bottom: 3pt;
     }
     @top-right {
-        content: "JTAGprobe / JTAGprobe_smp (RP2040 / RP2350)";
+        content: "JTAGprobe_smp_pio (RP2040 PIO Hardware JTAG)";
         font-family: "Liberation Sans", "DejaVu Sans", sans-serif;
         font-size: 7.5pt;
         color: #64748b;

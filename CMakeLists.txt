@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 include(pico_sdk_import.cmake)
 
-project(JTAGprobe_smp C CXX ASM)
+project(JTAGprobe_smp_pio C CXX ASM)
 
 # tinyusb without an OS: every tinyusb call is serialised by the probe's own
 # µOS++ mutex (src/probe_os.h), and none of tinyusb's own locking runs under
@@ -17,7 +17,7 @@ pico_sdk_init()
 # link micro-os-plus::cortexm.
 add_subdirectory(micro-os-plus/micro-os-plus-iii-rp2040)
 
-add_executable(JTAGprobe_smp
+add_executable(JTAGprobe_smp_pio
 
         src/DAP.c
         src/get_serial.c
@@ -29,20 +29,23 @@ add_executable(JTAGprobe_smp
         src/usb_descriptors.c
         src/tusb_edpt_handler.c
         src/cdc_uart.c
+        src/pio_jtag.c
 )
 
-target_include_directories(JTAGprobe_smp PRIVATE
+pico_generate_pio_header(JTAGprobe_smp_pio ${CMAKE_CURRENT_LIST_DIR}/src/jtag.pio)
+
+target_include_directories(JTAGprobe_smp_pio PRIVATE
 
         CMSIS_6/CMSIS/Core/Include/
         include/
         )
 
-target_compile_options(JTAGprobe_smp PRIVATE -Wall)
+target_compile_options(JTAGprobe_smp_pio PRIVATE -Wall)
 
 # src/ also holds cmsis-plus/os-app-config.h, the µOS++ configuration.
-target_include_directories(JTAGprobe_smp PRIVATE src)
+target_include_directories(JTAGprobe_smp_pio PRIVATE src)
 
-target_compile_definitions (JTAGprobe_smp PRIVATE
+target_compile_definitions (JTAGprobe_smp_pio PRIVATE
 	PICO_RP2040_USB_DEVICE_ENUMERATION_FIX=1
 	OS_USE_OS_APP_CONFIG_H
 	# The kernel's malloc() already runs under the scheduler lock, across
@@ -51,7 +54,7 @@ target_compile_definitions (JTAGprobe_smp PRIVATE
 )
 
 
-target_link_libraries(JTAGprobe_smp PRIVATE
+target_link_libraries(JTAGprobe_smp_pio PRIVATE
         micro-os-plus::rp2040
         pico_stdlib
         pico_unique_id
@@ -60,6 +63,6 @@ target_link_libraries(JTAGprobe_smp PRIVATE
         hardware_pio
 )
 
-pico_set_binary_type(JTAGprobe_smp copy_to_ram)
+pico_set_binary_type(JTAGprobe_smp_pio copy_to_ram)
 
-pico_add_extra_outputs(JTAGprobe_smp)
+pico_add_extra_outputs(JTAGprobe_smp_pio)

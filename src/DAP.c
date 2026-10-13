@@ -430,6 +430,10 @@ static uint32_t DAP_SWJ_Clock(const uint8_t *request, uint8_t *response) {
     DAP_Data.clock_delay = delay;
   }
 
+#if (USE_PIO_JTAG != 0)
+  pio_jtag_set_clock(clock);
+#endif
+
   *response = DAP_OK;
 #else
   *response = DAP_ERROR;

@@ -1,0 +1,31 @@
+;
+; JTAG PIO state machine for RP2040 (CMSIS-DAP)
+;
+
+.program jtag_tdo
+.side_set 1
+
+; Pin assignments:
+; - TCK: side-set pin 0 (GPIO 19), default HIGH
+; - TDI: OUT pin 0 (GPIO 18)
+; - TDO: IN pin 0 (GPIO 21)
+;
+; Autopull: enabled, threshold: 8, shift_right: true (LSB first)
+; Autopush: enabled, threshold: 8, shift_right: true (LSB first)
+;
+; Host protocol:
+; 1. Write (bit_count - 1) as a 32-bit word to TX FIFO
+; 2. Stream TDI data bytes (LSB first) to TX FIFO
+; 3. Read back TDO data bytes (LSB first) from RX FIFO
+
+.wrap_target
+    pull block          side 1      ; Wait for bit_count - 1 from TX FIFO, hold TCK high
+    mov x, osr          side 1      ; Load bit_count - 1 into X counter, hold TCK high
+
+loop:
+    out pins, 1         side 0 [1]  ; Shift 1 bit to TDI, drive TCK low (2 cycles low)
+    in pins, 1          side 1      ; Sample 1 bit from TDO, drive TCK high
+    jmp x--, loop       side 1      ; Decrement X and loop (2 cycles high total)
+
+    push noblock        side 1      ; Push any partial byte remaining in ISR, hold TCK high
+.wrap

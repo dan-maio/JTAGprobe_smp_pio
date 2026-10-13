@@ -78,6 +78,12 @@
 //   tdo:    pointer to TDO captured data
 //   return: none
 void JTAG_Sequence (uint32_t info, const uint8_t *tdi, uint8_t *tdo) {
+#if (USE_PIO_JTAG != 0)
+  if (pio_jtag_is_enabled()) {
+    pio_jtag_sequence(info, tdi, tdo);
+    return;
+  }
+#endif
   uint32_t i_val;
   uint32_t o_val;
   uint32_t bit;

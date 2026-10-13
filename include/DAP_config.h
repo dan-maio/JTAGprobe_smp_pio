@@ -51,6 +51,9 @@ This information includes:
 #include "cmsis_compiler.h"
 #include "probe.h"
 #include "DAP.h"
+#include "pio_jtag.h"
+
+#define USE_PIO_JTAG            1U
 
 /// Processor Clock of the Cortex-M MCU used in the Debug Unit.
 /// This value is used to calculate the SWD/JTAG clock speed.
@@ -362,9 +365,9 @@ Configures the DAP Hardware I/O pins for JTAG mode:
 
 
 __STATIC_INLINE void PORT_JTAG_SETUP (void) {
-
-//Later Mask can be written
-
+#if (USE_PIO_JTAG != 0)
+  pio_jtag_init(DAP_DEFAULT_SWJ_CLOCK);
+#else
   gpio_set_dir(DAP_SWJ_SWCLK_TCK,true);
   gpio_put(DAP_SWJ_SWCLK_TCK, true);
 
@@ -380,12 +383,8 @@ __STATIC_INLINE void PORT_JTAG_SETUP (void) {
   gpio_set_dir(DAP_SWJ_nRESET,true);
   gpio_put(DAP_SWJ_nRESET, true);
 
-
   gpio_set_dir(DAP_SWJ_TDO,false);
-  
-
-
-
+#endif
 }
 
 
@@ -398,7 +397,9 @@ Configures the DAP Hardware I/O pins for Serial Wire Debug (SWD) mode:
  - TDI, nTRST to HighZ mode (pins are unused in SWD mode).
 */
 __STATIC_INLINE void PORT_SWD_SETUP (void) {
-
+#if (USE_PIO_JTAG != 0)
+  pio_jtag_deinit();
+#endif
   gpio_put(DAP_SWJ_SWCLK_TCK, true);
   gpio_set_dir(DAP_SWJ_SWCLK_TCK, true);
 
@@ -421,7 +422,9 @@ Disables the DAP Hardware I/O pins which configures:
  - TCK/SWCLK, TMS/SWDIO, TDI, TDO, nTRST, nRESET to High-Z mode.
 */
 __STATIC_INLINE void PORT_OFF (void) {
-
+#if (USE_PIO_JTAG != 0)
+  pio_jtag_deinit();
+#endif
     set_pin_high_z(DAP_SWJ_SWCLK_TCK);
     set_pin_high_z(DAP_SWJ_SWDIO_TMS);
     set_pin_high_z(DAP_SWJ_TDI);

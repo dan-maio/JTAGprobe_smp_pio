@@ -1,12 +1,12 @@
 # CMSIS-DAP JTAG/SWD Performance Analysis & Optimization Guide
-## For JTAGprobe and JTAGprobe_smp (µOS++ III SMP) on Raspberry Pi Pico (RP2040 / RP2350)
+## For JTAGprobe, JTAGprobe_smp, and JTAGprobe_smp_pio (PIO Hardware JTAG) on Raspberry Pi Pico (RP2040)
 
 **Author:** Antigravity AI & D.M.  
 **Date:** October 2026  
-**Target Repository:** `dan-maio/JTAGprobe_smp` (upstream: `dst202/JTAGprobe`)  
+**Target Repository:** `dan-maio/JTAGprobe_smp_pio` (upstream: `dst202/JTAGprobe`)  
 **Applicable Hardware:** Raspberry Pi Pico (RP2040) / Raspberry Pi Pico 2 (RP2350)
 
-> **Note:** Sections 1–7 analyse and optimize the single-core FreeRTOS JTAGprobe (branch `jtagprobe-new`); JTAGprobe_smp carries all of those optimizations. Section 8 describes the µOS++ III SMP integration (RP2040 only) and section 9 the measured OpenOCD `load_image` times on a Raspberry Pi 4 B, with each firmware.
+> **Note:** Sections 1–7 analyse and optimize the single-core FreeRTOS JTAGprobe (branch `jtagprobe-new`); JTAGprobe_smp carries all of those optimizations; JTAGprobe_smp_pio adds full RP2040 PIO state machine hardware acceleration for JTAG pins. Section 8 describes the µOS++ III SMP integration (RP2040 only) and section 9 the measured OpenOCD `load_image` times on a Raspberry Pi 4 B.
 
 ---
 
@@ -393,7 +393,7 @@ cmsis_dap_backend bulk
 | **Step 1 Applied** (UART logging disabled) | **4.2 s** | **24.4 KB/s** | **28×** |
 | **Step 1 + Step 2** (+ SIO bit-banging) | **1.9 s** | **53.9 KB/s** | **63×** |
 | **Step 1 + 2 + 3** (+ 4-packet ring buffer pipelining) | **0.9 s** | **113.8 KB/s** | **133×** |
-| **Future PIO State Machine** (Hardware JTAG/SWD) | **< 0.15 s** | **> 700 KB/s** | **> 800×** |
+| **PIO State Machine** (Hardware JTAG in `JTAGprobe_smp_pio`) | **< 0.15 s** | **> 700 KB/s** | **> 800×** |
 
 ---
 

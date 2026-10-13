@@ -1,22 +1,26 @@
-# JTAGprobe_smp
-A CMSIS-DAP v2 JTAG and SWD debug probe firmware with an integrated USB CDC-ACM UART serial bridge for the **Raspberry Pi Pico (RP2040)**, running on the **µOS++ III SMP** kernel across both Cortex-M0+ cores.
+# JTAGprobe_smp_pio
+A CMSIS-DAP v2 JTAG and SWD debug probe firmware with an integrated USB CDC-ACM UART serial bridge for the **Raspberry Pi Pico (RP2040)**, running on the **µOS++ III SMP** kernel across both Cortex-M0+ cores with **RP2040 PIO Hardware Acceleration** for JTAG pins.
 
-It is JTAGprobe (branch `jtagprobe-new`, with all of its speed optimizations) with FreeRTOS replaced by µOS++ III SMP (`micro-os-plus-iii-smp`). The Pico SDK still boots the board; the kernel then schedules the probe's threads on both cores: **core 0** serves the USB host (tinyusb) and the UART bridge, **core 1** runs nothing but the CMSIS-DAP commands (the JTAG/SWD bit-banging).
+It builds on `JTAGprobe_smp` (dual-core µOS++ III SMP kernel) and introduces **hardware state machine acceleration using the RP2040 Programmable I/O (PIO)** blocks:
+- **Core 0**: Handles USB communication (TinyUSB) and the CDC-ACM UART bridge.
+- **Core 1**: Dedicated to CMSIS-DAP command execution.
+- **PIO State Machine**: Offloads high-speed JTAG clocking (`TCK`), serial data output (`TDI`), and serial data capture (`TDO`) from the CPU to dedicated hardware state machines.
 
 ---
 
 ## Features
 
+- **Hardware PIO JTAG Acceleration:** Replaces CPU bit-banging loops with a dedicated RP2040 PIO state machine (`src/jtag.pio`, `src/pio_jtag.c`, `include/pio_jtag.h`). Shifting is executed at hardware speed with exact 50% TCK duty cycle and sub-cycle timing precision.
 - **JTAG & SWD Debugging:** Full CMSIS-DAP v2 bulk transport support for OpenOCD, pyOCD, probe-rs, and Keil MDK.
 - **Hardware USB CDC-ACM UART Bridge:** Virtual COM port (`/dev/ttyACMx` on Linux, `COMx` on Windows) bridged directly to target UART on GPIO 12/13.
 - **High Performance:**
+  - PIO hardware serialization and deserialization for zero CPU bit-banging stall.
   - Zero blocking debug logging overhead on DAP transfers.
-  - Single-cycle RP2040 SIO atomic register operations for high-speed bit-banging.
-  - Multi-packet ring buffer (4 slots) preventing USB NAK back-offs.
-- **Dual-core (SMP):** the DAP thread has core 1 to itself, so JTAG/SWD bit-banging overlaps the USB transfers and the UART bridge on core 0.
-- **Dynamic Baud Rate:** Automatically adjusts hardware UART baud rate, parity, stop bits, and data bits when changed by the host terminal software.
-- **Supported Hardware:**
-  - Raspberry Pi Pico (RP2040). The µOS++ port in this tree (`micro-os-plus-iii-rp2040`) is RP2040-only; there is no Pico 2 (RP2350) build of JTAGprobe_smp.
+  - Single-cycle RP2040 SIO atomic register fallback.
+  - Multi-packet ring buffer (4 slots) with 512-byte DAP packet size.
+- **Dual-core (SMP):** The DAP thread runs on core 1, overlapping JTAG hardware transfers with USB and UART bridge activity on core 0.
+- **Dynamic Clock & Baud Rates:** Automatic PIO clock divider adjustment tracking OpenOCD `adapter speed` commands, and dynamic UART line coding.
+- **Supported Hardware:** Raspberry Pi Pico (RP2040).
 
 ---
 
